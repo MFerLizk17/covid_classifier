@@ -1,229 +1,272 @@
-import os
+"""
+Módulo de preprocesamiento para tomografías computarizadas (CT).
+
+Implementa un pipeline inteligente basado en detección de ruidos específicos
+identificados en el dataset de Teherán (Kaggle, Aria et al., 2021).
+"""
+
+import logging
+from pathlib import Path
+from typing import Dict, Optional, Tuple, Union
+
 import cv2
 import numpy as np
-import pandas as pd
-from typing import Dict, Tuple
-import kagglehub
-from skimage.restoration import estimate_sigma
+from scipy.ndimage import gaussian_filter
+from scipy.signal import welch
 
-# ==============================
-# 📥 DESCARGA DATASET
-# ==============================
+# --- CONFIGURACIÓN DE REGISTRO ---
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s"
+)
+logger = logging.getLogger("CT_Preprocess_System")
 
-def download_dataset() -> str:
+
+class CTPreprocessor:
     """
-    Descarga el dataset desde Kaggle usando kagglehub.
+    Preprocesador de Tomografías Computarizadas (CT) para clasificación de COVID-19.
+
+    Implementa un pipeline de 5 etapas:
+        1. Normalización de rango dinámico (windowing).
+        2. Análisis espectral y estadístico del ruido.
+        3. Control de calidad y descarte de imágenes.
+        4. Filtrado condicional según perfil de ruido.
+        5. Redimensionamiento con preservación de aspecto (padding).
+
+    Attributes:
+        target_size (Tuple[int, int]): Dimensión de salida (ancho, alto) en píxeles.
+        SNR_LIMIT (float): Umbral mínimo de SNR en dB para aplicar NLM.
+        SFM_LIMIT (float): Umbral de planitud espectral para detectar ruido blanco.
+        SP_DENSITY_LIMIT (float): Densidad mínima de outliers para detectar sal y pimienta.
     """
-    path = kagglehub.dataset_download(
-        "mehradaria/covid19-lung-ct-scans"
-    )
-    print(f"Dataset descargado en: {path}")
-    return path
 
-
-# ==============================
-# 🧠 FILTRO DE CALIDAD
-# ==============================
-
-class ImageQualityFilter:
-
-    def compute_snr(self, image: np.ndarray) -> float:
-        mean = np.mean(image)
-        std = np.std(image)
-        return float(mean / (std + 1e-8))
-
-    def compute_blur(self, image: np.ndarray) -> float:
-        lap = cv2.Laplacian(image, cv2.CV_64F)
-        return float(lap.var())
-
-    def compute_entropy(self, image: np.ndarray) -> float:
-        hist = cv2.calcHist([image.astype(np.uint8)], [0], None, [256], [0, 256])
-        hist = hist / hist.sum()
-        hist = hist + 1e-8
-        return float(-np.sum(hist * np.log2(hist)))
-
-    def detect_artifacts(self, image: np.ndarray) -> Dict[str, float]:
-        artifacts = {}
-
-        # saturación (metal / outliers)
-        artifacts["saturation"] = float(np.sum(image > 250) / image.size)
-
-        # ruido estimado
-        artifacts["noise_sigma"] = float(estimate_sigma(image, channel_axis=None))
-
-        return artifacts
-
-    def is_valid(self, image: np.ndarray, thresholds: Dict) -> Tuple[bool, Dict]:
-        metrics = {}
-
-        snr = self.compute_snr(image)
-        blur = self.compute_blur(image)
-        entropy = self.compute_entropy(image)
-        artifacts = self.detect_artifacts(image)
-
-        metrics.update({
-            "snr": snr,
-            "blur": blur,
-            "entropy": entropy,
-            **artifacts
-        })
-
-        valid = True
-        reasons = []
-
-        if snr < thresholds["snr"]:
-            valid = False
-            reasons.append("low_snr")
-
-        if blur < thresholds["blur"]:
-            valid = False
-            reasons.append("blur")
-
-        if not (thresholds["entropy_min"] <= entropy <= thresholds["entropy_max"]):
-            valid = False
-            reasons.append("entropy")
-
-        if artifacts["saturation"] > thresholds["saturation"]:
-            valid = False
-            reasons.append("saturation")
-
-        metrics["reason"] = "|".join(reasons)
-        return valid, metrics
-
-
-# ==============================
-# 🧪 PREPROCESAMIENTO
-# ==============================
-
-class Preprocessor:
-
-    def windowing(self, image: np.ndarray, wl: int = -600, ww: int = 1500) -> np.ndarray:
+    def __init__(self, target_size: Tuple[int, int] = (224, 224)) -> None:
         """
-        Simulación de windowing para imágenes PNG (aproximado)
+        Inicializa el preprocesador con los parámetros globales del pipeline.
+
+        Args:
+            target_size: Tupla (ancho, alto) para el redimensionamiento final.
+                         Por defecto (224, 224), estándar para CNN en imágenes médicas.
         """
-        min_val = wl - ww // 2
-        max_val = wl + ww // 2
+        self.target_size = target_size
 
-        image = np.clip(image, min_val, max_val)
-        image = (image - min_val) / (max_val - min_val)
-        return image
+        # SNR < 20 dB: el ruido comienza a degradar texturas finas (vidrio esmerilado).
+        self.SNR_LIMIT: float = 20.0
+        # SFM > 0.65: la señal es suficientemente plana para considerarse ruido blanco.
+        self.SFM_LIMIT: float = 0.65
+        # Densidad de outliers > 0.5%: indica presencia de ruido impulsivo (sal y pimienta).
+        self.SP_DENSITY_LIMIT: float = 0.005
 
-    def normalize(self, image: np.ndarray) -> np.ndarray:
-        return cv2.normalize(image, None, 0, 1, cv2.NORM_MINMAX)
+    def apply_windowing(self, img: np.ndarray) -> np.ndarray:
+        """
+        Estandariza el rango dinámico de la imagen (windowing).
 
-    def denoise(self, image: np.ndarray) -> np.ndarray:
-        return cv2.bilateralFilter(image.astype(np.float32), 7, 50, 50)
+        Normaliza los valores de píxel al rango [0.0, 1.0] mediante min-max scaling,
+        simulando una ventana pulmonar sobre el dominio de intensidades disponible.
 
-    def clahe(self, image: np.ndarray) -> np.ndarray:
-        image = (image * 255).astype(np.uint8)
-        clahe = cv2.createCLAHE(clipLimit=2.5, tileGridSize=(8, 8))
-        return clahe.apply(image) / 255.0
+        Args:
+            img: Array uint8 con la imagen original en escala de grises.
 
-    def resize(self, image: np.ndarray, size: int = 224) -> np.ndarray:
-        h, w = image.shape
-        scale = size / max(h, w)
-        new_h, new_w = int(h * scale), int(w * scale)
+        Returns:
+            Array float32 normalizado en el rango [0.0, 1.0].
 
-        image_resized = cv2.resize(image, (new_w, new_h))
+        Raises:
+            ValueError: Si la imagen de entrada está vacía o es None.
+        """
+        if img is None or img.size == 0:
+            raise ValueError("La imagen proporcionada está vacía o es None.")
 
-        pad_h = size - new_h
-        pad_w = size - new_w
+        img_float = img.astype(np.float32)
+        min_val = np.min(img_float)
+        max_val = np.max(img_float)
 
-        image_padded = np.pad(
-            image_resized,
-            ((pad_h // 2, pad_h - pad_h // 2),
-             (pad_w // 2, pad_w - pad_w // 2)),
-            mode='constant'
+        # Epsilon (1e-8) evita división por cero en imágenes de intensidad uniforme.
+        return (img_float - min_val) / (max_val - min_val + 1e-8)
+
+    def analyze_noise(
+        self, img_norm: np.ndarray
+    ) -> Dict[str, Union[float, bool]]:
+        """
+        Analiza la naturaleza del ruido mediante métricas espectrales y estadísticas.
+
+        Métricas calculadas:
+            - SNR (dB): Relación señal-ruido. Valores < 10 dB indican imagen no apta.
+            - SFM: Spectral Flatness Measure. Compara media geométrica vs aritmética
+              de la PSD; valores cercanos a 1 indican ruido blanco (espectro plano).
+            - Densidad sal y pimienta: Proporción de píxeles en los extremos del rango.
+
+        Args:
+            img_norm: Array float32 normalizado en [0.0, 1.0].
+
+        Returns:
+            Diccionario con las siguientes claves:
+                - 'snr_db' (float): Relación señal-ruido en decibeles.
+                - 'sfm' (float): Spectral Flatness Measure [0, 1].
+                - 'is_white' (bool): True si el ruido es predominantemente blanco.
+                - 'has_sp' (bool): True si hay ruido impulsivo (sal y pimienta).
+                - 'low_quality' (bool): True si la imagen debe ser descartada.
+        """
+        # Separar señal base (paso bajo) del componente de ruido (alta frecuencia).
+        low_pass = gaussian_filter(img_norm, sigma=2.0)
+        noise = img_norm - low_pass
+
+        # 1. SFM vía método de Welch sobre la fila central de la imagen.
+        mid_row = img_norm.shape[0] // 2
+        _, psd = welch(noise[mid_row, :], fs=1.0, nperseg=64)
+        psd_pos = psd[psd > 0]
+        sfm = float(
+            np.exp(np.mean(np.log(psd_pos + 1e-12))) / (np.mean(psd_pos) + 1e-12)
         )
 
-        return image_padded
+        # 2. SNR en dB: varianza de señal sobre varianza de ruido estimado.
+        snr_db = float(
+            10 * np.log10(np.var(low_pass) / (np.var(noise) + 1e-12))
+        )
 
-    def process(self, image: np.ndarray) -> np.ndarray:
-        image = self.windowing(image)
-        image = self.denoise(image)
-        image = self.clahe(image)
-        image = self.normalize(image)
-        image = self.resize(image)
+        # 3. Densidad de píxeles outliers extremos (sal y pimienta).
+        sp_density = float(
+            np.sum((img_norm < 0.001) | (img_norm > 0.999)) / img_norm.size
+        )
 
-        # expandir canal (H,W) → (H,W,1)
-        image = np.expand_dims(image, axis=-1)
+        return {
+            "snr_db": snr_db,
+            "sfm": sfm,
+            "is_white": sfm > self.SFM_LIMIT,
+            "has_sp": sp_density > self.SP_DENSITY_LIMIT,
+            # SNR < 10 dB: umbral de descarte crítico, imagen no apta para diagnóstico.
+            "low_quality": snr_db < 10.0,
+        }
 
-        return image
+    def apply_filters(
+        self, img_norm: np.ndarray, flags: Dict[str, Union[float, bool]]
+    ) -> np.ndarray:
+        """
+        Aplica filtros condicionales según el perfil de ruido detectado.
 
+        Lógica de filtrado:
+            - Filtro de mediana: elimina outliers (sal y pimienta) sin difuminar bordes.
+            - Non-Local Means (NLM): promedia parches similares, ideal para ruido
+              blanco térmico con SNR degradado.
+            - CLAHE: estandariza el contraste local con clipLimit=2.0 para evitar
+              que el ruido de fondo se amplifique como artefactos.
 
-# ==============================
-# 🚀 PIPELINE PRINCIPAL
-# ==============================
+        Args:
+            img_norm: Array float32 normalizado en [0.0, 1.0].
+            flags: Diccionario generado por analyze_noise con claves
+                   'has_sp', 'is_white' y 'snr_db'.
 
-def run_pipeline():
-    dataset_path = download_dataset()
+        Returns:
+            Array float32 filtrado y realzado, normalizado en [0.0, 1.0].
+        """
+        output = img_norm.copy()
 
-    output_dir = "/home/fernanda_lizcano/covid_classifier/data/outputs"
-    os.makedirs(output_dir, exist_ok=True)
+        # Paso 1: Filtro de mediana para ruido impulsivo (kernel 3×3).
+        if flags["has_sp"]:
+            output_u8 = (output * 255).astype(np.uint8)
+            output = cv2.medianBlur(output_u8, 3).astype(np.float32) / 255.0
 
-    valid_dir = os.path.join(output_dir, "valid")
-    reject_dir = os.path.join(output_dir, "rejected")
+        # Paso 2: NLM para ruido blanco con SNR degradado.
+        # h=6: equilibrio entre eliminación de grano y preservación de vasos sanguíneos.
+        if flags["is_white"] and flags["snr_db"] < self.SNR_LIMIT:
+            output_u8 = (output * 255).astype(np.uint8)
+            output = cv2.fastNlMeansDenoising(
+                output_u8, None, h=6, templateWindowSize=7, searchWindowSize=21
+            ).astype(np.float32) / 255.0
 
-    os.makedirs(valid_dir, exist_ok=True)
-    os.makedirs(reject_dir, exist_ok=True)
+        # Paso 3: CLAHE siempre aplicado para estandarizar contraste local.
+        clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+        output_u8 = (output * 255).astype(np.uint8)
+        output = clahe.apply(output_u8).astype(np.float32) / 255.0
 
-    log_data = []
+        return output
 
-    iqf = ImageQualityFilter()
-    pre = Preprocessor()
+    def resize_and_pad(self, img: np.ndarray) -> np.ndarray:
+        """
+        Redimensiona la imagen preservando la proporción original mediante padding.
 
-    thresholds = {
-        "snr": 8,
-        "blur": 100,
-        "entropy_min": 4,
-        "entropy_max": 7,
-        "saturation": 0.02
-    }
+        Calcula el factor de escala para que la imagen quepa en target_size sin
+        distorsión anatómica, y rellena con ceros (negro) el espacio restante.
 
-    # buscar imágenes recursivamente
-    for root, _, files in os.walk(dataset_path):
-        for file in files:
-            if not file.lower().endswith((".png", ".jpg", ".jpeg")):
-                continue
+        Args:
+            img: Array float32 de cualquier dimensión válida.
 
-            path = os.path.join(root, file)
+        Returns:
+            Array float32 de dimensión exacta target_size (alto, ancho).
+        """
+        h, w = img.shape[:2]
+        target_h, target_w = self.target_size
 
-            try:
-                img = cv2.imread(path, cv2.IMREAD_GRAYSCALE).astype(np.float32)
+        ratio = min(target_w / w, target_h / h)
+        new_w = int(w * ratio)
+        new_h = int(h * ratio)
 
-                valid, metrics = iqf.is_valid(img, thresholds)
+        resized = cv2.resize(
+            img, (new_w, new_h), interpolation=cv2.INTER_LINEAR
+        )
 
-                if valid:
-                    processed = pre.process(img)
-                    save_path = os.path.join(valid_dir, file)
-                    cv2.imwrite(save_path, (processed * 255).astype(np.uint8))
-                else:
-                    save_path = os.path.join(reject_dir, file)
-                    cv2.imwrite(save_path, img)
+        delta_w = target_w - new_w
+        delta_h = target_h - new_h
+        top = delta_h // 2
+        bottom = delta_h - top
+        left = delta_w // 2
+        right = delta_w - left
 
-                log_data.append({
-                    "file": file,
-                    "valid": valid,
-                    **metrics
-                })
+        return cv2.copyMakeBorder(
+            resized, top, bottom, left, right,
+            cv2.BORDER_CONSTANT, value=0
+        )
 
-            except Exception as e:
-                log_data.append({
-                    "file": file,
-                    "valid": False,
-                    "error": str(e)
-                })
+    def run_pipeline(self, image_path: Path) -> Optional[np.ndarray]:
+        """
+        Ejecuta el pipeline completo de preprocesamiento sobre una imagen.
 
-    # guardar log
-    df = pd.DataFrame(log_data)
-    df.to_csv(os.path.join(output_dir, "log.csv"), index=False)
+        Etapas:
+            1. Lectura en escala de grises.
+            2. Normalización de rango dinámico (windowing).
+            3. Análisis del perfil de ruido.
+            4. Control de calidad (descarte si SNR < 10 dB).
+            5. Filtrado y realce condicional.
+            6. Redimensionamiento con padding a target_size.
 
-    print("Pipeline completado 🚀")
+        Args:
+            image_path: Objeto Path apuntando al archivo de imagen.
 
+        Returns:
+            Array float32 de dimensión target_size listo para la CNN,
+            o None si la imagen no supera el control de calidad.
 
-# ==============================
-# ▶️ RUN
-# ==============================
+        Raises:
+            FileNotFoundError: Si la ruta especificada no existe.
+        """
+        if not image_path.exists():
+            raise FileNotFoundError(f"Ruta no encontrada: {image_path}")
 
-if __name__ == "__main__":
-    run_pipeline()
+        raw_img = cv2.imread(str(image_path), cv2.IMREAD_GRAYSCALE)
+        if raw_img is None:
+            logger.warning(f"No se pudo leer la imagen: {image_path.name}")
+            return None
+
+        # Etapa 1: Normalización.
+        img_norm = self.apply_windowing(raw_img)
+
+        # Etapa 2: Análisis de ruido.
+        noise_profile = self.analyze_noise(img_norm)
+        logger.info(
+            f"{image_path.name} | SNR: {noise_profile['snr_db']:.2f} dB "
+            f"| SFM: {noise_profile['sfm']:.3f} "
+            f"| SP: {noise_profile['has_sp']}"
+        )
+
+        # Etapa 3: Control de calidad.
+        if noise_profile["low_quality"]:
+            logger.warning(
+                f"Imagen descartada por baja calidad "
+                f"(SNR={noise_profile['snr_db']:.2f} dB): {image_path.name}"
+            )
+            return None
+
+        # Etapa 4: Filtrado condicional.
+        img_filtered = self.apply_filters(img_norm, noise_profile)
+
+        # Etapa 5: Geometría final.
+        return self.resize_and_pad(img_filtered)
