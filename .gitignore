@@ -1,7 +1,6 @@
-Q
-
-
-
-
-Z
-x
+.venv/
+__pycache__/
+*.pyc
+data/
+wheels/
+*.h5
