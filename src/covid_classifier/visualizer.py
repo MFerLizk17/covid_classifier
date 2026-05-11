@@ -17,7 +17,7 @@ from PIL import Image as PILImage
 from sklearn.decomposition import PCA
 from torch.utils.data import Dataset
 
-from src.model import Autoencoder
+from model import Autoencoder
 
 
 # ─────────────────────────────────────────────

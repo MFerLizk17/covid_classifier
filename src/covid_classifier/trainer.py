@@ -14,9 +14,9 @@ import torch.optim as optim
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
-from src.config import UNetConfig
-from src.loss import ContrastiveLoss
-from src.model import Autoencoder
+from config import UNetConfig
+from loss import ContrastiveLoss
+from model import Autoencoder
 
 
 def train_one_epoch(

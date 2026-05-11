@@ -10,7 +10,7 @@ import logging
 from pathlib import Path
 from typing import Dict, Union
 
-from src.config import CONFIG
+from config import CONFIG
 
 logger = logging.getLogger(__name__)
 

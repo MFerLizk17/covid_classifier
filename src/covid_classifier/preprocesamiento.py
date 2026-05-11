@@ -13,10 +13,10 @@ import cv2
 import numpy as np
 import matplotlib.pyplot as plt
 
-from src.config import CONFIG
-from src.noise_detector import analyze_noise
-from src.quality_control import check_quality
-from src.filter_engine import apply_filters
+from config import CONFIG
+from noise_detector import analyze_noise
+from quality_control import check_quality
+from filter_engine import apply_filters
 
 logger = logging.getLogger(__name__)
 

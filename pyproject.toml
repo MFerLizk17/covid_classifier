@@ -6,9 +6,8 @@ readme = "README.md"
 authors = [
     { name = "Fernanda Lizcano", email = "maria.lizcanou@gmail.com" }
 ]
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.13"
 dependencies = [
-    "tensorflow[and-cuda]==2.18.0",
     "pillow>=10.0.0",
     "matplotlib>=3.8.0",
     "numpy>=1.26.0",
@@ -18,8 +17,9 @@ dependencies = [
     "pandas>=2.3.3",
     "scikit-image>=0.26.0",
     "kagglehub>=1.0.0",
-    "torch>=2.11.0",
-    "torchvision>=0.26.0",
+    "torch>=2.5.1",
+    "torchvision>=0.20.1",
+    "torchaudio>=2.5.1",
 ]
 
 [project.scripts]

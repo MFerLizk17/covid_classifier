@@ -24,8 +24,8 @@ from torch.utils.data import DataLoader, Dataset
 from torchvision import transforms
 from tqdm import tqdm
 
-from src.config import UNetConfig
-from src.model import Autoencoder
+from config import UNetConfig
+from model import Autoencoder
 
 
 # ─────────────────────────────────────────────

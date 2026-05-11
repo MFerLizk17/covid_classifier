@@ -12,7 +12,7 @@ import numpy as np
 from scipy.ndimage import gaussian_filter
 from scipy.signal import welch
 
-from src.config import CONFIG
+from config import CONFIG
 
 logger = logging.getLogger(__name__)
 

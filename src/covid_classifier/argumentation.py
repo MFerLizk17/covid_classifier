@@ -19,7 +19,7 @@ Transformaciones excluidas:
 
 import numpy as np
 import cv2
-from src.config import CONFIG
+from config import CONFIG
 
 
 def random_rotation(img: np.ndarray) -> np.ndarray:

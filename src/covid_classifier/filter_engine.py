@@ -29,7 +29,7 @@ from typing import Dict, Optional, Union
 from scipy import ndimage
 from scipy.ndimage import gaussian_filter
 
-from src.config import CONFIG
+from config import CONFIG
 
 logger = logging.getLogger(__name__)
 
