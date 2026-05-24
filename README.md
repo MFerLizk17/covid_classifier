@@ -253,9 +253,7 @@ El sistema muestra:
 2. Reporte en terminal con probabilidades COVID/No-COVID
 3. Ventana con 4 paneles: imagen original, zona diagnóstica, reconstrucción y barras de probabilidad
 
-> En linux 
-
-El sistema guardará 3 tipo de imágenes en /data/: 
+Además el sistema guardará 3 tipo de imágenes en /data/: 
 1. preview.png -> Permite ver la imagen que entrar al modelo para ser clasificada
 2. rechazo_preprocesado.png -> En dado caso que no cumpla las dos condiciones (ruido y área de información) mostrará la información para tener más claridad del rechazo
 3. resultado_clasificacion.png -> Si la imagen es aprobada, pasa por la predicción y dará información de porque esa decisión
