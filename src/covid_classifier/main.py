@@ -580,28 +580,35 @@ def _imprimir_resultado(
 
 def _mostrar_resultado_visual(
     img_np: np.ndarray,
+    img_proc_np: np.ndarray,
     recon_np: np.ndarray,
     heatmap: np.ndarray,
     prob_covid: float,
     prob_no_covid: float,
     clase: str,
+    noise_profile: Dict,
+    pct_contenido: float,
 ) -> None:
     """
-    Muestra ventana con 4 paneles de análisis del resultado.
+    Muestra imagen con 5 paneles de análisis del resultado.
 
     Paneles:
-        1. Imagen TAC original seleccionada
-        2. Heatmap de zona diagnóstica superpuesto
-        3. Reconstrucción interna del modelo
-        4. Barras horizontales de probabilidad
+        1. Imagen TAC original (raw, sin procesar)
+        2. Imagen preprocesada (máscara pulmonar aplicada)
+        3. Heatmap de zona diagnóstica superpuesto sobre preprocesada
+        4. Reconstrucción interna del modelo
+        5. Barras de probabilidad + resumen de calidad
 
     Args:
-        img_np: Imagen original como array numpy (H, W).
+        img_np: Imagen original raw como array numpy (H, W).
+        img_proc_np: Imagen preprocesada (máscara pulmonar) (H, W).
         recon_np: Imagen reconstruida por el Decoder (H, W).
         heatmap: Mapa de importancia normalizado (H, W).
         prob_covid: Probabilidad COVID en porcentaje.
         prob_no_covid: Probabilidad No-COVID en porcentaje.
         clase: Clase predicha ('COVID' o 'No-COVID').
+        noise_profile: Diccionario de analyze_noise() con snr_db, sfm, has_sp.
+        pct_contenido: Porcentaje de píxeles con información útil.
     """
     import matplotlib.pyplot as plt
     import matplotlib.gridspec as gridspec
@@ -612,56 +619,184 @@ def _mostrar_resultado_visual(
         f"  |  COVID: {prob_covid:.1f}%  |  No-COVID: {prob_no_covid:.1f}%"
     )
 
-    fig = plt.figure(figsize=(16, 5))
-    fig.suptitle(titulo, fontsize=13, fontweight="bold", color=color_titulo)
-    gs  = gridspec.GridSpec(1, 4, figure=fig, wspace=0.35)
+    fig = plt.figure(figsize=(22, 5))
+    fig.suptitle(titulo, fontsize=13, fontweight="bold", color=color_titulo, y=1.01)
+    gs  = gridspec.GridSpec(1, 5, figure=fig, wspace=0.38)
 
     ax1 = fig.add_subplot(gs[0])
     ax2 = fig.add_subplot(gs[1])
     ax3 = fig.add_subplot(gs[2])
     ax4 = fig.add_subplot(gs[3])
+    ax5 = fig.add_subplot(gs[4])
 
-    # Panel 1 — Imagen original
+    # Panel 1 — Imagen original raw
     ax1.imshow(img_np, cmap="gray")
-    ax1.set_title("Imagen TAC\noriginal", fontsize=10)
+    ax1.set_title("1. TAC original\n(sin procesar)", fontsize=10)
     ax1.axis("off")
 
-    # Panel 2 — Zona diagnóstica
-    ax2.imshow(img_np, cmap="gray")
-    hmap_plot = ax2.imshow(heatmap, cmap="jet", alpha=0.5)
-    ax2.set_title("Zona diagnóstica\n(rojo = mayor peso)", fontsize=10)
+    # Panel 2 — Imagen preprocesada (máscara pulmonar)
+    ax2.imshow(img_proc_np, cmap="gray")
+    ax2.set_title(
+        f"2. Preprocesada\n(contenido: {pct_contenido:.1f}%)", fontsize=10
+    )
     ax2.axis("off")
-    plt.colorbar(hmap_plot, ax=ax2, fraction=0.046)
 
-    # Panel 3 — Reconstrucción interna
-    ax3.imshow(recon_np, cmap="gray")
-    ax3.set_title("Reconstrucción\ndel modelo", fontsize=10)
+    # Panel 3 — Zona diagnóstica (heatmap sobre preprocesada)
+    ax3.imshow(img_proc_np, cmap="gray")
+    hmap_plot = ax3.imshow(heatmap, cmap="jet", alpha=0.5)
+    ax3.set_title("3. Zona diagnóstica\n(rojo = mayor peso)", fontsize=10)
     ax3.axis("off")
+    plt.colorbar(hmap_plot, ax=ax3, fraction=0.046)
 
-    # Panel 4 — Barras de probabilidad
+    # Panel 4 — Reconstrucción interna del modelo
+    ax4.imshow(recon_np, cmap="gray")
+    ax4.set_title("4. Reconstrucción\ndel modelo", fontsize=10)
+    ax4.axis("off")
+
+    # Panel 5 — Barras de probabilidad + resumen de calidad
     etiquetas = ["COVID", "No-COVID"]
     valores   = [prob_covid, prob_no_covid]
     colores   = ["#E53935", "#1E88E5"]
 
-    bars = ax4.barh(etiquetas, valores, color=colores, alpha=0.85, height=0.4)
-    ax4.set_xlim(0, 100)
-    ax4.set_xlabel("Probabilidad (%)")
-    ax4.set_title("Probabilidades\nde clasificación", fontsize=10)
-    ax4.axvline(x=50, color="gray", linestyle="--", alpha=0.5)
+    bars = ax5.barh(etiquetas, valores, color=colores, alpha=0.85, height=0.4)
+    ax5.set_xlim(0, 110)
+    ax5.set_xlabel("Probabilidad (%)")
+    ax5.set_title("5. Probabilidades\nde clasificación", fontsize=10)
+    ax5.axvline(x=50, color="gray", linestyle="--", alpha=0.5)
 
     for bar, val in zip(bars, valores):
-        ax4.text(
+        ax5.text(
             val + 1,
             bar.get_y() + bar.get_height() / 2,
             f"{val:.1f}%",
             va="center", fontsize=11, fontweight="bold",
         )
-    ax4.grid(True, alpha=0.3, axis="x")
+    ax5.grid(True, alpha=0.3, axis="x")
+
+    # Resumen de calidad debajo de las barras
+    ruido_txt = []
+    if noise_profile["has_sp"]:
+        ruido_txt.append("sal/pimienta")
+    if noise_profile["is_white"]:
+        ruido_txt.append("ruido blanco")
+    ruido_str = ", ".join(ruido_txt) if ruido_txt else "sin ruido relevante"
+
+    ax5.text(
+        0.5, -0.18,
+        f"SNR: {noise_profile['snr_db']:.1f} dB  |  {ruido_str}",
+        transform=ax5.transAxes,
+        fontsize=8, ha="center", color="#555555",
+        bbox=dict(boxstyle="round,pad=0.3", facecolor="#F5F5F5",
+                  edgecolor="#DDDDDD", alpha=0.9),
+    )
 
     plt.tight_layout()
     plt.savefig("data/resultado_clasificacion.png", dpi=150, bbox_inches="tight")
     plt.close(fig)
-    logger.info("Resultado guardado en: resultado_clasificacion.png")
+    logger.info("Resultado guardado en: data/resultado_clasificacion.png")
+
+
+def _mostrar_rechazo_visual(
+    ruta_imagen: Path,
+    img_procesada: np.ndarray,
+    noise_profile: Dict,
+    pct_contenido: float,
+    motivo: str,
+) -> None:
+    """
+    Guarda una imagen comparativa cuando la imagen es rechazada.
+
+    Muestra dos paneles lado a lado:
+        1. Imagen original raw
+        2. Imagen preprocesada (resultado del pipeline aunque sea rechazada)
+
+    Con el motivo de rechazo y las métricas de calidad en el título,
+    para que el usuario pueda inspeccionar visualmente qué falló.
+
+    Args:
+        ruta_imagen: Ruta a la imagen original raw.
+        img_procesada: Array float32 [0,1] resultado del pipeline.
+        noise_profile: Diccionario de analyze_noise().
+        pct_contenido: Porcentaje de píxeles con información.
+        motivo: Texto descriptivo del motivo de rechazo.
+    """
+    import matplotlib.pyplot as plt
+    from PIL import Image as PILImage
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 5))
+    fig.suptitle(
+        f"✗ IMAGEN RECHAZADA — {ruta_imagen.name}\n"
+        f"Motivo: {motivo}",
+        fontsize=12, fontweight="bold", color="#B71C1C",
+    )
+
+    # Panel 1 — Original raw
+    img_raw = np.array(PILImage.open(ruta_imagen).convert("L"))
+    ax1.imshow(img_raw, cmap="gray")
+    ax1.set_title("Imagen original (raw)", fontsize=11)
+    ax1.axis("off")
+
+    # Panel 2 — Preprocesada
+    ax2.imshow(img_procesada, cmap="gray")
+    ax2.set_title(
+        f"Imagen preprocesada\n"
+        f"SNR: {noise_profile['snr_db']:.1f} dB  |  "
+        f"Contenido: {pct_contenido:.1f}%",
+        fontsize=10,
+    )
+    ax2.axis("off")
+
+    plt.tight_layout()
+    out_path = "data/rechazo_preprocesado.png"
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    logger.info(f"Imagen preprocesada del rechazo guardada en: {out_path}")
+
+
+def _validar_contenido_imagen(img_procesada: np.ndarray, umbral_pct: float = 10.0) -> Tuple[bool, float]:
+    """
+    Verifica que la imagen procesada tenga suficiente contenido diagnóstico.
+
+    Calcula el porcentaje de píxeles no-negros (> 0.01) sobre el total.
+    Una imagen con menos del umbral_pct% de contenido indica que la
+    máscara pulmonar no capturó tejido suficiente para ser diagnóstica.
+
+    Args:
+        img_procesada: Array float32 normalizado en [0.0, 1.0].
+        umbral_pct: Porcentaje mínimo de píxeles con información. Default 10%.
+
+    Returns:
+        Tupla (es_valida, porcentaje_contenido).
+    """
+    pct = float((img_procesada > 0.01).sum() / img_procesada.size * 100)
+    return pct >= umbral_pct, pct
+
+
+def _imprimir_reporte_preprocesamiento(
+    nombre: str,
+    noise_profile: Dict,
+    pct_contenido: float,
+) -> None:
+    """
+    Imprime en terminal el reporte de calidad de la imagen nueva.
+
+    Args:
+        nombre: Nombre del archivo analizado.
+        noise_profile: Diccionario retornado por analyze_noise().
+        pct_contenido: Porcentaje de píxeles con información tras preprocesar.
+    """
+    sep = "─" * 55
+    print(f"\n{sep}")
+    print(f"  ANÁLISIS DE CALIDAD — {nombre}")
+    print(sep)
+    print(f"  SNR                 : {noise_profile['snr_db']:.2f} dB"
+          f"  {'✓' if not noise_profile['low_quality'] else '✗ (< 10 dB)'}")
+    print(f"  Ruido blanco (SFM)  : {noise_profile['sfm']:.3f}"
+          f"  {'⚠ detectado' if noise_profile['is_white'] else '✓ ok'}")
+    print(f"  Sal y pimienta      : {'⚠ detectado' if noise_profile['has_sp'] else '✓ no detectado'}")
+    print(f"  Contenido pulmonar  : {pct_contenido:.1f}%"
+          f"  {'✓' if pct_contenido >= 10.0 else '✗ (< 10%)'}")
+    print(sep)
 
 
 def run_predict(image_path: Optional[str] = None) -> None:
@@ -669,21 +804,24 @@ def run_predict(image_path: Optional[str] = None) -> None:
     Modo interactivo de clasificación de una imagen TAC individual.
 
     Flujo completo:
-        1. Si no se pasa image_path, abre el selector CLI numerado
-        2. Muestra la imagen seleccionada → usuario confirma cerrando ventana
-        3. El modelo analiza la imagen
-        4. Imprime probabilidades y zona diagnóstica en terminal
-        5. Abre ventana con 4 paneles: original, heatmap, reconstrucción, barras
+        1. Selección de imagen (CLI o argumento)
+        2. Preprocesamiento completo con run_pipeline() sobre la imagen raw
+        3. Análisis de ruido con analyze_noise()
+        4. Control de calidad: SNR mínimo y contenido pulmonar ≥ 10%
+        5. Clasificación con el Autoencoder
+        6. Reporte en terminal + visualización con heatmap
 
     Args:
-        image_path: Ruta opcional a la imagen. Si es None activa el selector CLI.
+        image_path: Ruta opcional a la imagen RAW. Si es None activa el selector CLI.
     """
     import torch
     import pickle
     from PIL import Image as PILImage
     from torchvision import transforms
 
-    from model import Autoencoder
+    from model          import Autoencoder
+    from noise_detector import analyze_noise
+    from quality_control import check_quality
 
     cfg    = UNET_CONFIG
     device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -696,25 +834,101 @@ def run_predict(image_path: Optional[str] = None) -> None:
         )
         return
 
-    # ── Selección de imagen ─────────────────────────────────────
+    # ── Selección de imagen (raw, no procesada) ─────────────────
+    # Si se pasa --image se usa directamente; si no, el selector
+    # muestra imágenes de data/raw/ para que el usuario elija una
+    # imagen que aún no ha pasado por el pipeline.
     if image_path is None:
-        image_path = _seleccionar_imagen(PROCESSED_DIR)
+        logger.info("Selecciona la imagen TAC a analizar (imagen raw):")
+        image_path = _solicitar_ruta_manual()
 
-    # ── Transformación ──────────────────────────────────────────
+    ruta_imagen = Path(image_path)
+    if not ruta_imagen.exists():
+        logger.error(f"No se encontró el archivo: {ruta_imagen}")
+        return
+
+    sep = "=" * 55
+
+    # ── Paso 1: Analisis de ruido sobre imagen RAW ───────────
+    # Se mide ANTES de preprocesar: si la imagen raw ya tiene
+    # demasiado ruido no tiene sentido correr el pipeline.
+    print(f"\n{sep}")
+    print(f"  ANALIZANDO CALIDAD RAW: {ruta_imagen.name}")
+    print(sep)
+
+    from PIL import Image as _PILRaw
+    _img_raw_u8   = np.array(_PILRaw.open(ruta_imagen).convert("L")).astype(np.float32)
+    _rng          = _img_raw_u8.max() - _img_raw_u8.min()
+    _img_raw_norm = (_img_raw_u8 - _img_raw_u8.min()) / (_rng + 1e-8)
+
+    noise_profile = analyze_noise(_img_raw_norm)
+
+    if not check_quality(noise_profile, image_name=ruta_imagen.name):
+        _imprimir_reporte_preprocesamiento(ruta_imagen.name, noise_profile, pct_contenido=0.0)
+        logger.error(
+            f"✗ Imagen rechazada por baja calidad RAW "
+            f"(SNR = {noise_profile['snr_db']:.2f} dB < 10 dB).\n"
+            "  No se ejecutara el preprocesamiento."
+        )
+        _mostrar_rechazo_visual(ruta_imagen, _img_raw_norm, noise_profile, 0.0,
+                                motivo=f"SNR muy bajo en raw ({noise_profile['snr_db']:.1f} dB < 10 dB)")
+        return
+
+    logger.info(f"✓ Calidad raw aceptable — SNR: {noise_profile['snr_db']:.2f} dB")
+
+    # ── Paso 2: Pipeline de preprocesamiento ───────────────────
+    print(f"\n{sep}")
+    print(f"  PREPROCESANDO: {ruta_imagen.name}")
+    print(sep)
+
+    img_procesada, motivo_descarte = run_pipeline(ruta_imagen)
+
+    if img_procesada is None:
+        logger.error(
+            f"✗ Imagen descartada en preprocesamiento"
+            f" (motivo: {motivo_descarte}).\n"
+            "  La mascara pulmonar no pudo segmentarse correctamente."
+        )
+        return
+
+    logger.info("✓ Preprocesamiento completado")
+
+    # ── Paso 3: Validar contenido pulmonar >= 10% ───────────────
+    es_valida, pct_contenido = _validar_contenido_imagen(img_procesada, umbral_pct=10.0)
+    _imprimir_reporte_preprocesamiento(ruta_imagen.name, noise_profile, pct_contenido)
+
+    if not es_valida:
+        logger.error(
+            f"✗ Imagen rechazada: solo {pct_contenido:.1f}% de contenido pulmonar "
+            f"(mínimo requerido: 10%).\n"
+            "  La segmentación no capturó suficiente tejido diagnóstico."
+        )
+        _mostrar_rechazo_visual(ruta_imagen, img_procesada, noise_profile, pct_contenido,
+                                motivo=f"Contenido pulmonar insuficiente ({pct_contenido:.1f}% < 10%)")
+        return
+
+    logger.info(f"✓ Imagen válida — contenido pulmonar: {pct_contenido:.1f}%")
+
+    # ── Paso 5: Preparar tensor para el modelo ──────────────────
+    # img_procesada ya es float32 [0,1] de 224×224; solo redimensionar a IMG_SIZE
     transform = transforms.Compose([
-        transforms.Grayscale(num_output_channels=1),
         transforms.Resize((cfg.IMG_SIZE, cfg.IMG_SIZE)),
         transforms.ToTensor(),
     ])
 
-    img_pil    = PILImage.open(image_path).convert("RGB")
+    # Convertir float32 numpy → PIL → tensor
+    img_pil    = PILImage.fromarray((img_procesada * 255).astype(np.uint8)).convert("L")
     img_tensor = transform(img_pil).unsqueeze(0).to(device)
     img_np     = img_tensor.cpu().squeeze().numpy()
 
-    # ── Previsualización antes del análisis ─────────────────────
-    _previsualizar_imagen(img_np, Path(image_path).name)
+    # Guardar también la imagen original raw para mostrarla en el panel
+    img_raw_pil = PILImage.open(ruta_imagen).convert("L")
+    img_raw_np  = np.array(img_raw_pil.resize((cfg.IMG_SIZE, cfg.IMG_SIZE))) / 255.0
 
-    # ── Cargar modelo y centroides ──────────────────────────────
+    # ── Previsualización antes del análisis ─────────────────────
+    _previsualizar_imagen(img_np, ruta_imagen.name)
+
+    # ── Paso 6: Cargar modelo y centroides ──────────────────────
     modelo = Autoencoder(cfg.LATENT_DIM).to(device)
     modelo.load_state_dict(torch.load(cfg.MODEL_PATH, map_location=device))
     modelo.eval()
@@ -748,21 +962,24 @@ def run_predict(image_path: Optional[str] = None) -> None:
 
     # ── Reporte en terminal ─────────────────────────────────────
     _imprimir_resultado(
-        nombre_imagen   = Path(image_path).name,
+        nombre_imagen   = ruta_imagen.name,
         prob_covid      = prob_covid,
         prob_no_covid   = prob_no_covid,
         clase           = clase,
         porcentaje_zona = porcentaje_zona,
     )
 
-    # ── Visualización final ─────────────────────────────────────
+    # ── Visualización final (5 paneles) ─────────────────────────
     _mostrar_resultado_visual(
-        img_np       = img_np,
-        recon_np     = recon_np,
-        heatmap      = heatmap,
-        prob_covid   = prob_covid,
-        prob_no_covid= prob_no_covid,
-        clase        = clase,
+        img_np        = img_raw_np,      # imagen original sin procesar
+        img_proc_np   = img_np,          # imagen preprocesada (máscara pulmonar)
+        recon_np      = recon_np,
+        heatmap       = heatmap,
+        prob_covid    = prob_covid,
+        prob_no_covid = prob_no_covid,
+        clase         = clase,
+        noise_profile = noise_profile,
+        pct_contenido = pct_contenido,
     )
 
 
